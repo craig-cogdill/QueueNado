@@ -9,6 +9,7 @@
 #include <mutex>
 #include <memory>
 #include <Shotgun.h>
+#include <Rifle.h>
 #include <Vampire.h>
 #include <StopWatch.h>
 
@@ -49,9 +50,9 @@ bool Notifier::Initialize(const size_t handshakeCount) {
       gHandshakeQueue = std::move(CreateHandshakeQueue());
    }
    if (gQueue.get() == nullptr) {
-      gQueue.reset(new Shotgun);
+      gQueue.reset(new Rifle(GetNotifierQueueName()));
       try {
-         gQueue->Aim(GetNotifierQueueName());
+         gQueue->Aim();
       } catch (std::exception& e) {
          LOG(WARNING) << "Caught exception: " << e.what();
          Reset();
@@ -90,11 +91,11 @@ std::unique_ptr<Vampire> Notifier::CreateHandshakeQueue() {
  * @param string to be sent to listeners
  * @return number of confirmed updates
  */
-size_t Notifier::Notify(const std::string& message) {
-   std::vector<std::string> bullets;
-   bullets.push_back(message);
-   return Notify(bullets);
-}
+// size_t Notifier::Notify(const std::string& message) {
+//    std::vector<std::string> bullets;
+//    bullets.push_back(message);
+//    return Notify(bullets);
+// }
 
 /*
  * Fire a dummy message from the Shotgun to be
@@ -107,6 +108,18 @@ size_t Notifier::Notify() {
    return Notify(kNotifyMessage);
 }
 
+/**
+* RAII delete the string after it has been sent through the Rifle/Vampire queue back to the 
+* Notifier
+*/
+
+namespace {
+   void ZeroCopyDelete(void*, void* data) {
+      std::string* theString = reinterpret_cast<std::string*>(data);
+      delete theString;  
+   }
+}
+
 /*
  * Fire a message from the Shotgun to be
  *    read by the queue subscriber. Then wait for listeners
@@ -115,21 +128,22 @@ size_t Notifier::Notify() {
  * @param vector of strings to be sent to the listeners             
  * @return number of confirmed updates
  */
-size_t Notifier::Notify(const std::vector<std::string>& messages) {
+size_t Notifier::Notify(const std::string& message) {
    std::lock_guard<std::mutex> guard(gLock);
-   std::vector<std::string> bullets;
-   bullets.push_back("dummy");
+   // std::vector<std::string> bullets;
+   // bullets.push_back("dummy");
 
-   for (auto& msg : messages) {
-      bullets.push_back(msg);
-   }
+   // for (auto& msg : messages) {
+   //    bullets.push_back(msg);
+   // }
 
    if (QueuesAreUnitialized()) {
       LOG(WARNING) << "Uninitialized notifier queues";
       return {0};
    }
-   LOG(INFO) << "Notifier: Sending " << bullets.size() << " messages";
-   gQueue->Fire(bullets);
+   std::string* msg = new std::string(message);
+   // LOG(INFO) << "Notifier: Sending " << bullets.size() << " messages";
+   gQueue->FireZeroCopy(msg, msg->size(), ZeroCopyDelete, kMaxTimeoutInSec);;
    size_t confirmed = ReceiveConfirmation();
    LOG(INFO) << "Notifier received " << confirmed << " handshakes";
    return {confirmed};
@@ -144,20 +158,21 @@ size_t Notifier::Notify(const std::vector<std::string>& messages) {
 size_t Notifier::ReceiveConfirmation() {
    StopWatch waitCheck;
    size_t responses = 0;
-   while (responses < gHandshakeCount && waitCheck.ElapsedSec() < gMaxTimeoutInSec) {
+   while (responses < gHandshakeCount && waitCheck.ElapsedSec() < static_cast<unsigned int>(kMaxTimeoutInSec)) {
       std::string msg;
-      if (gHandshakeQueue->GetShot(msg, gMaxTimeoutInSec)) {
+      if (gHandshakeQueue->GetShot(msg, kMaxTimeoutInSec)) {
          LOG(INFO) << "Received update confirmation from thread #"
                    << msg << ", response count #" << ++responses;
       }
    }
 
-   const bool goodEnough = waitCheck.ElapsedSec() < gMaxTimeoutInSec || responses == gHandshakeCount;
+   const bool goodEnough = waitCheck.ElapsedSec() < static_cast<unsigned int>(kMaxTimeoutInSec) || responses == gHandshakeCount;
 
-   LOG_IF(WARNING, !goodEnough) << "Listener confirmation timed out after" << gMaxTimeoutInSec
+   LOG_IF(WARNING, !goodEnough) << "Listener confirmation timed out after" << kMaxTimeoutInSec
                                 << "seconds... " << responses << "/" << gHandshakeCount << " replied";
    return responses;
 }
+
 
 /*
  * Reset the Shotgun-Alien queue to nullptr
